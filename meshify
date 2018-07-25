@@ -15,6 +15,10 @@ PASS="praisebob"
 POSTURL="https://$USER:$PASS@$MESHNODEDB/nodes"
 OSTYPE="debian" # TODO detect
 
+ESSID="pplsopen.net-node2node"
+BSSID=CA:FE:C0:DE:F0:0D
+IFACE=$1
+
 json_parse() {
   if [ "$OSTYPE" == "debian" ]; then
 
@@ -28,7 +32,10 @@ json_parse() {
 }
 
 json_parse_debian() {
-  echo $1
+  MESHIP=$(echo $1 | jq -r '.data.mesh_addr_ipv4')
+  MESHBLOCK=$(echo $1 | jq -r '.data.open_subnet_ipv4')
+  echo "received mesh IP:" $MESHIP
+  echo "received mesh block:" $MESHBLOCK"/26"
 }
 
 json_parse_openwrt() {
@@ -39,8 +46,8 @@ json_parse_openwrt() {
    json_select data 
    json_get_var MESHIP mesh_addr_ipv4 
    json_get_var MESHBLOCK open_subnet_ipv4 
-   echo "recieved mesh IP:" $MESHIP >>$LOG
-   echo "recieved mesh block:" $MESHBLOCK"/26" >>$LOG
+   echo "received mesh IP:" $MESHIP >>$LOG
+   echo "received mesh block:" $MESHBLOCK"/26" >>$LOG
 
 }
 
@@ -63,4 +70,33 @@ retrieve_ip() {
 
 }
 
-retrieve_ip
+if [ $2 ]; then
+    MESHIP=$2
+    echo "mesh IP address manually set to $MESHIP"
+else
+    retrieve_ip
+fi
+
+# Stop Network Manager from managing your interface
+NM_CONF=/etc/NetworkManager/NetworkManager.conf
+LINE_1="[keyfile]"
+grep -qF -- "$LINE_1" "$NM_CONF" || echo "$LINE_1" >> "$NM_CONF"
+LINE_2="unmanaged-devices=interface-name:$IFACE"
+grep -qF -- "$LINE_2" "$NM_CONF" || echo "$LINE_2" >> "$NM_CONF"
+
+# Add exit nodes as dns servers, allows name resolution over mesh
+DNS_CONF=/etc/resolvconf/resolv.conf.d/tail
+DNS_1="nameserver 100.64.0.43"
+DNS_2="nameserver 100.64.0.42"
+grep -qF -- "$DNS_1" "$DNS_CONF" || echo "$DNS_1" >> "$DNS_CONF"
+grep -qF -- "$DNS_2" "$DNS_CONF" || echo "$DNS_2" >> "$DNS_CONF"
+
+/etc/init.d/network-manager restart
+
+ip link set $IFACE down 
+ip addr add $MESHIP/32 dev $IFACE
+ip link set $IFACE up 
+
+iwconfig $IFACE essid $ESSID ap $BSSID channel 6 mode ad-hoc
+
+#babeld $IFACE
