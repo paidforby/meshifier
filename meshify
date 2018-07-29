@@ -161,6 +161,8 @@ meshify_interface() {
 
     iwconfig $IFACE essid $ESSID ap $BSSID channel 6 mode ad-hoc
 
+    #iw dev $IFACE ibss join $ESSID 2437 $BSSID 
+
 }
 
 main() {
