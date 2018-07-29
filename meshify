@@ -7,20 +7,56 @@
 # MESH IP and other related settings stored in
 # /opt/mesh/zeroconf
 
+set -x
+set -e
+
 # default configs for People's Open Network
 LOG="/dev/stdout"
 MESHNODEDB="secrets.peoplesopen.net"
 USER="deployer"
 PASS="praisebob"
 POSTURL="https://$USER:$PASS@$MESHNODEDB/nodes"
-OSTYPE="debian" # TODO detect
-
 ESSID="pplsopen.net-node2node"
 BSSID=CA:FE:C0:DE:F0:0D
-IFACE=$1
+DNS_1="100.64.0.43"
+DNS_2="100.64.0.42"
+
+# SWITCHS
+RETRIEVE=0
+MANUAL=0
+START_BABEL=0
+FORCE=0
+PHYSICAL=0
+CREATE=0
+DELETE=0
+
+if [ -f /etc/os-release ]; then
+    # freedesktop.org and systemd
+    . /etc/os-release
+    OS=$ID
+    VER=$VERSION_ID
+elif type lsb_release >/dev/null 2>&1; then
+    # linuxbase.org
+    OS=$(lsb_release -si)
+    VER=$(lsb_release -sr)
+elif [ -f /etc/lsb-release ]; then
+    # For some versions of Debian/Ubuntu without lsb_release command
+    . /etc/lsb-release
+    OS=$DISTRIB_ID
+    VER=$DISTRIB_RELEASE
+elif [ -f /etc/debian_version ]; then
+    # Older Debian/Ubuntu/etc.
+    OS=debian
+    VER=$(cat /etc/debian_version)
+else
+    # Fall back to uname, e.g. "Linux <version>", also works for BSD, etc.
+    OS=$(uname -s)
+    VER=$(uname -r)
+fi
 
 json_parse() {
-  if [ "$OSTYPE" == "debian" ]; then
+
+  if [ "$OS" == "debian" ]; then
 
     json_parse_debian $@
 
@@ -32,10 +68,12 @@ json_parse() {
 }
 
 json_parse_debian() {
+
   MESHIP=$(echo $1 | jq -r '.data.mesh_addr_ipv4')
   MESHBLOCK=$(echo $1 | jq -r '.data.open_subnet_ipv4')
   echo "received mesh IP:" $MESHIP
   echo "received mesh block:" $MESHBLOCK"/26"
+
 }
 
 json_parse_openwrt() {
@@ -53,50 +91,169 @@ json_parse_openwrt() {
 
 retrieve_ip() {
 
-    echo "retrieving an IP address from" $MESHNODEDB >>$LOG
+    # Takes database url and post url as input
+    echo "Retrieving an mesh IP address from $1"
 
-    if ping -q -c 1 -W 1 $MESHNODEDB >/dev/null; then
-        echo $MESHNODEDB "is reachable" >>$LOG
+    if ping -q -c 1 -W 1 $1 >/dev/null; then
+        echo $1 "is reachable" >>$LOG
     else
-        echo $MESHNODEDB "is not reachable" >>$LOG
+        echo $1 "is not reachable" >>$LOG
         exit 1
     fi
 
     # make a post request to meshnode-databse
-    echo "posting to" $POSTURL >>$LOG
-    MESHNODE_DATA=$(curl -X POST -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode data='{"type":"node", "debug":true}' $POSTURL )
+    echo "posting to" $2 >>$LOG
+    MESHNODE_DATA=$(curl -X POST -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode data='{"type":"node", "debug":true}' $2 )
 
     json_parse $MESHNODE_DATA
 
 }
 
-if [ $2 ]; then
-    MESHIP=$2
-    echo "mesh IP address manually set to $MESHIP"
-else
-    retrieve_ip
+set_ip() {
+
+    echo "Setting mesh IP address to $MESHIP"
+    ip link set $IFACE down  
+    ip addr add $MESHIP/32 dev $IFACE
+    ip link set $IFACE up 
+
+}
+
+config_network_manager() {
+
+    # Stop Network Manager from managing your interface
+    NM_CONF=/etc/NetworkManager/NetworkManager.conf
+
+    LINE_1="[keyfile]"
+    LINE_2="unmanaged-devices=interface-name:$IFACE"
+
+    grep -qF -- "$LINE_1" "$NM_CONF" || echo "$LINE_1" >> "$NM_CONF"
+    grep -qF -- "$LINE_2" "$NM_CONF" || echo "$LINE_2" >> "$NM_CONF"
+
+}
+
+config_dns_resolver() {
+
+    # Add exit nodes as dns servers, allows name resolution over mesh
+    DNS_CONF=/etc/resolvconf/resolv.conf.d/tail
+
+    LINE_1="nameserver $DNS_1"
+    LINE_2="nameserver $DNS_2"
+
+    grep -qF -- "$DNS_1" "$DNS_CONF" || echo "$DNS_1" >> "$DNS_CONF"
+    grep -qF -- "$DNS_2" "$DNS_CONF" || echo "$DNS_2" >> "$DNS_CONF"
+
+}
+
+
+create_virtual_interface() {
+
+    #Takes physical device and desired virtual interface name
+    iw phy $1 interface add $2 type ibss 
+
+}
+
+delete_virtual_interface() {
+    echo "Deleting virtual interface $1"
+    iw dev $1 del
+}
+
+meshify_interface() {
+
+    iwconfig $IFACE essid $ESSID ap $BSSID channel 6 mode ad-hoc
+
+}
+
+main() {
+
+    set_ip $MESHIP
+    config_network_manager
+    config_dns_resolver
+    /etc/init.d/network-manager restart
+    meshify_interface
+    echo "Successfully meshified $IFACE!"
+    if [ $START_BABEL = 1 ]; then
+        echo "Starting babeld on $IFACE, keep this terminal open to keep babbeling"
+        babeld $IFACE
+    else
+        echo  "You may need to start babeld to see anyone!"
+    fi
+
+}
+
+usage() {
+
+   echo "meshify [-a] [-m <MESH_IP>] [-b] [-f] [-p <PHY_DEV>] [-i <IFACE>] [-x [IFACE>]"
+   exit 1
+
+}
+
+while getopts ":am:fp:i:bx:" opt; do
+  case $opt in
+    a)
+      RETRIEVE=1
+      ;;
+    m)
+      MANUAL=1
+      MESHIP=$OPTARG 
+      ;;
+    b)  
+      START_BABEL=1
+      ;;
+    f)
+      FORCE=1
+      ;;
+    p)
+      PHYSICAL=1
+      PHY_DEV=$OPTARG
+      ;;  
+    i)
+      CREATE=1
+      IFACE=$OPTARG
+      ;;
+    x)
+      DELETE=1
+      IFACE=$OPTARG
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      usage
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      usage
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+# Do some logic with switch booleans
+if [[ $FORCE == 0 && $PHYSICAL == 1 ]]; then
+    echo "Creating virtual interface on physical device $PHY_DEV"
+    create_virtual_interface $PHY_DEV $IFACE
+elif [[ $FORCE == 1 && $PHYSICAL == 0 ]]; then
+    echo "Warning: forcing meshify to use interface $IFACE"
+elif [[ $CREATE = 1 && $FORCE == 0 && $PHYSICAL == 0 ]]; then
+    echo "Warning: asked meshify to use interface $IFACE," 
+    echo "this could permanently alter network settings of this interface," 
+    echo "please use -f switch if you'd like to force the use of $IFACE"
+    exit 1
+fi 
+
+if [[ $RETRIEVE == 1 && $MANUAL == 1 ]]; then
+    echo "Error: asked meshify to retrieve a mesh IP and set it manually, please choose one"
+    usage
+fi
+if [ $RETRIEVE == 1 ]; then
+    retrieve_ip $MESHNODEDB $POSTURL
 fi
 
-# Stop Network Manager from managing your interface
-NM_CONF=/etc/NetworkManager/NetworkManager.conf
-LINE_1="[keyfile]"
-grep -qF -- "$LINE_1" "$NM_CONF" || echo "$LINE_1" >> "$NM_CONF"
-LINE_2="unmanaged-devices=interface-name:$IFACE"
-grep -qF -- "$LINE_2" "$NM_CONF" || echo "$LINE_2" >> "$NM_CONF"
+# Delete interface, otherwise enter main script
+if [ $DELETE == 1 ]; then
+    delete_virtual_interface $IFACE
+else
+    main
+fi
 
-# Add exit nodes as dns servers, allows name resolution over mesh
-DNS_CONF=/etc/resolvconf/resolv.conf.d/tail
-DNS_1="nameserver 100.64.0.43"
-DNS_2="nameserver 100.64.0.42"
-grep -qF -- "$DNS_1" "$DNS_CONF" || echo "$DNS_1" >> "$DNS_CONF"
-grep -qF -- "$DNS_2" "$DNS_CONF" || echo "$DNS_2" >> "$DNS_CONF"
-
-/etc/init.d/network-manager restart
-
-ip link set $IFACE down 
-ip addr add $MESHIP/32 dev $IFACE
-ip link set $IFACE up 
-
-iwconfig $IFACE essid $ESSID ap $BSSID channel 6 mode ad-hoc
-
-#babeld $IFACE
+exit 0
