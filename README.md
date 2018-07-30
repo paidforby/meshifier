@@ -18,7 +18,8 @@ It now has the ability to create virtual interfaces on a physical adpater of you
 -f (force the usage of a non-virtual interface, i.e. probably the one you use for the internets)
 -p <physical_device> (on which you'd like to create a virtual interface)
 -i <interface_name> (interface you'd like to meshify)
--x <interface_name> (delete virtual interface, eventually remove altered configs)
+-u <interface_name> (unmeshify a previously meshified interface)
+-x <interface_name> (delete virtual interface, use with care!)
 ```
 
 To use, install dependencies manually,
@@ -65,10 +66,13 @@ Supported interface modes:
      * WDS
      * monitor
      * mesh point
+[...]
 software interface modes (can always be added):
      * AP/VLAN
      * monitor
-interface combinations are not supported
+valid interface combinations:
+     * #{ managed } <= 1, #{ AP, P2P-client, P2P-GO } <= 1, #{ P2P-device } <= 1,
+       total <= 3, #channels <= 2
 ```
 
 # Future plans

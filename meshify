@@ -28,6 +28,7 @@ START_BABEL=0
 FORCE=0
 PHYSICAL=0
 CREATE=0
+UNMESH=0
 DELETE=0
 
 if [ -f /etc/os-release ]; then
@@ -118,6 +119,15 @@ set_ip() {
 
 }
 
+delete_ip() {
+
+    echo "Setting mesh IP address to $MESHIP"
+    ip link set $IFACE down  
+    #ip addr del $MESHIP dev $IFACE
+    ip link set $IFACE up 
+
+}
+
 config_network_manager() {
 
     # Stop Network Manager from managing your interface
@@ -131,6 +141,18 @@ config_network_manager() {
 
 }
 
+clear_network_manager() {
+
+    # Remove possible changes to network manager config 
+    NM_CONF=/etc/NetworkManager/NetworkManager.conf
+
+    #LINE_1="[keyfile]"
+    LINE_2="unmanaged-devices=interface-name:$IFACE"
+
+    sed -i "/$LINE_2/d" $NM_CONF 
+
+}
+
 config_dns_resolver() {
 
     # Add exit nodes as dns servers, allows name resolution over mesh
@@ -141,6 +163,19 @@ config_dns_resolver() {
 
     grep -qF -- "$DNS_1" "$DNS_CONF" || echo "$DNS_1" >> "$DNS_CONF"
     grep -qF -- "$DNS_2" "$DNS_CONF" || echo "$DNS_2" >> "$DNS_CONF"
+
+}
+
+clear_dns_resolver() {
+
+    # Remove exit nodes as dns servers
+    DNS_CONF=/etc/resolvconf/resolv.conf.d/tail
+
+    #LINE_1="nameserver $DNS_1"
+    #LINE_2="nameserver $DNS_2"
+
+    sed -i "/$DNS_1/d" $DNS_CONF 
+    sed -i "/$DNS_2/d" $DNS_CONF 
 
 }
 
@@ -159,19 +194,33 @@ delete_virtual_interface() {
 
 meshify_interface() {
 
+    # Restart dhcp client, may fix issues with certain cards
+    dhclient -r
+
+    # Some devices (like TLWN722) only support iwconfig
     iwconfig $IFACE essid $ESSID ap $BSSID channel 6 mode ad-hoc
 
+    # However, other devices may not like iwconfig
     #iw dev $IFACE ibss join $ESSID 2437 $BSSID 
+    # so both options are included
+
+    #ip link set $IFACE down  
+    #ip link set $IFACE up 
 
 }
 
 main() {
 
-    set_ip $MESHIP
     config_network_manager
     config_dns_resolver
+
+    # restart network manager to regenerate configs
     /etc/init.d/network-manager restart
+
+    set_ip
+
     meshify_interface
+
     echo "Successfully meshified $IFACE!"
     if [ $START_BABEL = 1 ]; then
         echo "Starting babeld on $IFACE, keep this terminal open to keep babbeling"
@@ -182,6 +231,17 @@ main() {
 
 }
 
+un_main() {
+
+    #delete_ip
+    clear_network_manager
+    clear_dns_resolver
+
+    # restart network manager to regenerate configs
+    /etc/init.d/network-manager restart
+
+}
+
 usage() {
 
    echo "meshify [-a] [-m <MESH_IP>] [-b] [-f] [-p <PHY_DEV>] [-i <IFACE>] [-x [IFACE>]"
@@ -189,7 +249,7 @@ usage() {
 
 }
 
-while getopts ":am:fp:i:bx:" opt; do
+while getopts ":am:bfp:i:u:x:" opt; do
   case $opt in
     a)
       RETRIEVE=1
@@ -210,6 +270,10 @@ while getopts ":am:fp:i:bx:" opt; do
       ;;  
     i)
       CREATE=1
+      IFACE=$OPTARG
+      ;;
+    u)
+      UNMESH=1
       IFACE=$OPTARG
       ;;
     x)
@@ -251,9 +315,11 @@ if [ $RETRIEVE == 1 ]; then
     retrieve_ip $MESHNODEDB $POSTURL
 fi
 
-# Delete interface, otherwise enter main script
+# Delete or unmesh interface, otherwise enter main script
 if [ $DELETE == 1 ]; then
     delete_virtual_interface $IFACE
+elif [ $UNMESH == 1 ]; then
+    un_main
 else
     main
 fi
